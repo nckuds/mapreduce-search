@@ -1,4 +1,4 @@
-# multi-threading-search
+# mapreduce-search
 
 ## Usage
 
