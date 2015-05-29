@@ -1,8 +1,11 @@
 package net.spright.hdfs;
 
 import java.io.BufferedReader;
+import java.io.DataInput;
+import java.io.DataOutput;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.StringReader;
 import java.nio.charset.Charset;
 import java.util.Collections;
 import java.util.Comparator;
@@ -25,6 +28,8 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.Text;
+import org.apache.hadoop.io.WritableComparable;
+import org.apache.hadoop.mapred.OutputCollector;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.Mapper;
 import org.apache.hadoop.mapreduce.Reducer;
@@ -51,18 +56,22 @@ public class MapReduceSearch {
         //BlockingQueue<Path> pageQueue = new ArrayBlockingQueue(pageCount);
         long startTime = System.currentTimeMillis();
         
-        final FileStatus[] status = fs.listStatus(new Path("hdfs://course/user/course"));
-        System.out.println("total file: " + status.length);
+        //final FileStatus[] status = fs.listStatus(new Path("hdfs://course/user/course"));
+        
         
         Path input = new Path("hdfs://course/user/course");
+        System.out.println("total file: " + fs.listStatus(input).length);
         Path output = new Path(args[1]);
         Job job = Job.getInstance(configuration, "keyword search");
         job.setJarByClass(MapReduceSearch.class);
         job.setMapperClass(PageMapper.class);
         job.setCombinerClass(PageReducer.class);
         job.setReducerClass(PageReducer.class);
-        job.setOutputKeyClass(HtmlPage.class);
-        job.setOutputValueClass(String.class);
+        job.setMapOutputKeyClass(HtmlPage.class);
+        System.out.println(job.getMapOutputKeyClass().toString());
+        job.setMapOutputValueClass(Text.class);
+        job.setOutputKeyClass(Text.class);
+        job.setOutputValueClass(IntWritable.class);
         clearOutput(configuration, output);
         FileInputFormat.setInputDirRecursive(job, true);
         FileInputFormat.addInputPath(job, input);
@@ -81,25 +90,32 @@ public class MapReduceSearch {
         }
     }
         
-    public static class PageMapper extends Mapper<Object, Path, HtmlPage, String> {
+    public static class PageMapper extends Mapper<Object, Text, HtmlPage, Text> {
+        private HtmlPage page;
         
-        @Override
-        public void map(Object key, Path value, Context context) throws IOException, InterruptedException {
-            HtmlPage page = getHtmlPage(fs, value);
-            context.write(page, page.title.toLowerCase());
-            for(String word : page.content.trim().split("\\s++")) {
-                context.write(page, word);
+        public void map(Object key, Text value, Context output) throws IOException, InterruptedException {
+            page = getHtmlPage(value);
+            
+            if (page == null || page.link == null 
+                            || page.title == null || page.content == null) {
+                        return;
+                    }
+            
+            output.write(page, new Text(page.getTitle().toLowerCase()));
+            String[] words = page.getContent().trim().split("\\s++");
+            for(String word : words) {
+                output.write(page, new Text(word));
             }
         }
     }
-    public static class PageReducer extends Reducer<HtmlPage, String, String, IntWritable> {
-        private final IntWritable result = new IntWritable();
-        @Override
-        public void reduce(HtmlPage page, Iterable<String> words, Context context) throws IOException, InterruptedException {
+    public static class PageReducer extends Reducer<HtmlPage, Text, Text, IntWritable> {
+        private final static IntWritable result = new IntWritable();
+        
+        public void reduce(HtmlPage page, Iterable<Text> words, Context output) throws IOException, InterruptedException {
             int score = 0;
-            for(String word : words) {
-                if(word.contains(keyword)) {
-                    if(page.title.toLowerCase().equals(keyword))
+            for(Text word : words) {
+                if(word.find(keyword) > 0) {
+                    if(word.toString().equals(keyword))
                         score += 5;
                     else
                         score += 1;
@@ -107,7 +123,7 @@ public class MapReduceSearch {
             }
             //if(score != 0) {
                 result.set(score);
-                context.write(page.link, result);
+                output.write(new Text(page.getLink()), result);
             //}
         }
     }
@@ -117,17 +133,12 @@ public class MapReduceSearch {
        return fs;
     }
        
-    private static HtmlPage getHtmlPage(FileSystem fs, Path path)
+    private static HtmlPage getHtmlPage(Text file)
             throws IOException {     
         
-        if (!fs.getFileStatus(path).isFile()){
-            return null;
-        }
-                
+             
         try (BufferedReader reader = new BufferedReader(
-            new InputStreamReader(
-                fs.open(path)
-                , Charset.forName("UTF-8")))) {
+            new StringReader(file.toString()))) {
              
             String link = reader.readLine();
             String title = reader.readLine();
@@ -169,10 +180,13 @@ public class MapReduceSearch {
         System.out.println("Match link count: " + list.size());
     }      
   
-    private static class HtmlPage {
-        private final String link;
-        private final String title;
-        private final String content;
+    private static class HtmlPage implements WritableComparable{
+        private String link;
+        private String title;
+        private String content;
+        public HtmlPage()
+        {}
+        
         public HtmlPage(
             String link,
             String title,
@@ -190,6 +204,20 @@ public class MapReduceSearch {
         }
         public String getContent() {
             return content;
+        }
+        public void write(DataOutput out) throws IOException {
+            out.writeChars(this.link);
+            out.writeChars(this.title);
+            out.writeChars(this.content);
+        }
+        public void readFields(DataInput in) throws IOException {
+            this.link = in.readLine();
+            this.title = in.readLine();
+            this.content = in.readLine();
+        }
+        public int compareTo(Object o) {
+            
+            return this.link.compareTo(((HtmlPage)o).link);
         }
     }
 }
